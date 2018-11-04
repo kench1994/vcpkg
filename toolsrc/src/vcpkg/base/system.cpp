@@ -205,6 +205,8 @@ namespace vcpkg::System
 #endif
 
 #if defined(_WIN32)
+    static std::atomic<HANDLE> g_subprocess_job(nullptr);
+
     /// <param name="maybe_environment">If non-null, an environment block to use for the new process. If null, the new
     /// process will inherit the current environment.</param>
     static void windows_create_process(const CStringView cmd_line,
@@ -221,19 +223,53 @@ namespace vcpkg::System
         // Flush stdout before launching external process
         fflush(nullptr);
 
-        // Wrapping the command in a single set of quotes causes cmd.exe to correctly execute
-        const std::string actual_cmd_line = Strings::format(R"###(cmd.exe /c "%s")###", cmd_line);
-        Debug::println("CreateProcessW(%s)", actual_cmd_line);
-        bool succeeded = TRUE == CreateProcessW(nullptr,
-                                                Strings::to_utf16(actual_cmd_line).data(),
-                                                nullptr,
-                                                nullptr,
-                                                FALSE,
-                                                IDLE_PRIORITY_CLASS | CREATE_UNICODE_ENVIRONMENT | dwCreationFlags,
-                                                (void*)maybe_environment,
-                                                nullptr,
-                                                &startup_info,
-                                                process_info);
+        if (!(dwCreationFlags & DETACHED_PROCESS))
+        {
+            if (!g_subprocess_job) g_subprocess_job = ::CreateJobObjectW(nullptr, nullptr);
+            // creating job object will fail on Win7 if we are already inside a job
+            if (g_subprocess_job)
+            {
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+                limits.BasicLimitInformation.LimitFlags =
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+                auto success = ::SetInformationJobObject(
+                    g_subprocess_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+                Checks::check_exit(VCPKG_LINE_INFO, success, "SetInformationJobObject() failed");
+            }
+        }
+
+        if (!(dwCreationFlags & DETACHED_PROCESS) && g_subprocess_job)
+        {
+            // Wrapping the command in a single set of quotes causes cmd.exe to correctly execute
+            const std::string actual_cmd_line = Strings::format(R"###(cmd.exe /c "%s")###", cmd_line);
+            Debug::println("CreateProcessW(%s)", actual_cmd_line);
+            bool succeeded = TRUE == CreateProcessW(nullptr,
+                                                    Strings::to_utf16(actual_cmd_line).data(),
+                                                    nullptr,
+                                                    nullptr,
+                                                    FALSE,
+                                                    IDLE_PRIORITY_CLASS | CREATE_UNICODE_ENVIRONMENT | dwCreationFlags,
+                                                    (void*)maybe_environment,
+                                                    nullptr,
+                                                    &startup_info,
+                                                    process_info);
+        }
+        else
+        {
+            // Wrapping the command in a single set of quotes causes cmd.exe to correctly execute
+            const std::string actual_cmd_line = Strings::format(R"###(cmd.exe /c "%s")###", cmd_line);
+            Debug::println("CreateProcessW(%s)", actual_cmd_line);
+            bool succeeded = TRUE == CreateProcessW(nullptr,
+                                                    Strings::to_utf16(actual_cmd_line).data(),
+                                                    nullptr,
+                                                    nullptr,
+                                                    FALSE,
+                                                    IDLE_PRIORITY_CLASS | CREATE_UNICODE_ENVIRONMENT | dwCreationFlags,
+                                                    (void*)maybe_environment,
+                                                    nullptr,
+                                                    &startup_info,
+                                                    process_info);
+        }
 
         Checks::check_exit(VCPKG_LINE_INFO, succeeded, "Process creation failed with error code: %lu", GetLastError());
     }
@@ -401,7 +437,7 @@ namespace vcpkg::System
 #if defined(_WIN32)
         const HANDLE console_handle = GetStdHandle(STD_OUTPUT_HANDLE);
 
-        CONSOLE_SCREEN_BUFFER_INFO console_screen_buffer_info {};
+        CONSOLE_SCREEN_BUFFER_INFO console_screen_buffer_info{};
         GetConsoleScreenBufferInfo(console_handle, &console_screen_buffer_info);
         const auto original_color = console_screen_buffer_info.wAttributes;
 
